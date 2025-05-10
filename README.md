@@ -53,7 +53,7 @@ The `card.json` file is used to store user card data, connection tokens, and tra
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/your-username/Simple-DcBot-Virtual-Bank-Backend.git
+   git clone https://github.com/catroll1321/Simple-DcBot-Virtual-Bank-Backend.git
    cd Simple-DcBot-Virtual-Bank-Backend
    ```
 
