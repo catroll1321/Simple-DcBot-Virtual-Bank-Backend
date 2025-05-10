@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{extract::Json, response::IntoResponse, http::StatusCode};
-use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde_json::json;
-use structure::{Identification, CardInfo, TransactionType, TargetVerify, TargetInfo, DiscordTrade};
-use function::{get_json_map, write_json_info, check_balance, generate_token, gen_card, gen_card_num, hash_str_to_u64};
+use structure::{Identification, CardInfo, TargetVerify, TargetInfo, DiscordTrade, TradeHistory};
+use function::{get_card_map, write_card_info, generate_token, gen_card, gen_card_num, hash_str_to_u64, handler_transaction, get_trade_map, get_day_end};
 
 pub async fn sign_up_discord(Json(id): Json<Identification>) -> impl IntoResponse {
     // Generate account info
@@ -16,7 +16,7 @@ pub async fn sign_up_discord(Json(id): Json<Identification>) -> impl IntoRespons
     let good_thru = &card_account.good_thru.clone();
     let verify_number = &card_account.verify_number.clone();
 
-    let mut all_data: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut all_data: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -30,7 +30,7 @@ pub async fn sign_up_discord(Json(id): Json<Identification>) -> impl IntoRespons
 
     all_data.insert(hash_id, card_account);
 
-    if let Err(e) = write_json_info("card.json", &all_data) {
+    if let Err(e) = write_card_info("account.json", &all_data) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -39,7 +39,7 @@ pub async fn sign_up_discord(Json(id): Json<Identification>) -> impl IntoRespons
 }
 
 pub async fn discord_transaction(Json(id): Json<DiscordTrade>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -47,55 +47,18 @@ pub async fn discord_transaction(Json(id): Json<DiscordTrade>) -> impl IntoRespo
         }
     };
 
-    let data = match card_map.values_mut().find(|data| data.card_holder == id.card_holder) {
-        Some(card) => card,
-        None => return (StatusCode::BAD_REQUEST, "No card found!").into_response(),
+    let result = match handler_transaction(id, &mut card_map) {
+        Ok(message) => message,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    let new_balance = match id.transaction_type {
-        TransactionType::Credit { amount } => {
-            match Decimal::from_f64(amount) {
-                Some(price) => {
-                    data.balance += price;
-                    let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
-                    let transaction_type = transaction_map.entry(String::from("Transaction")).or_insert_with(Vec::new);
-                    transaction_type.push(TransactionType::Credit { amount });
-                    Some(data.balance)
-                }
-                _ => None,
-            }
-        }
-        TransactionType::Debit { amount } => {
-            match Decimal::from_f64(amount) {
-                Some(price) if check_balance(&data.balance, price) => {
-                    data.balance -= price;
-                    let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
-                    let transaction_type = transaction_map.entry(String::from("Transaction")).or_insert_with(Vec::new);
-                    transaction_type.push(TransactionType::Debit { amount });
-                    Some(data.balance)
-                }
-                _ => None,
-            }
-        }
-    };
-
-    let balance = match new_balance {
-        Some(b) => b,
-        None => return (StatusCode::BAD_REQUEST, "Transaction failed, please check the amount format").into_response(),
-    };
-
-    if let Err(e) = write_json_info("card.json", &card_map) {
-        println!("Error in writing card json: {}", e);
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    format!("Transaction successful! Balance : {} USD", balance).into_response()
+    (StatusCode::OK, result).into_response()
 }
 
 pub async fn connect_verify(Json(target): Json<TargetVerify>) -> impl IntoResponse {
     //I will make a key system later?
     let connect_key: String = String::from("connection_key");
-    let mut card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -126,7 +89,7 @@ pub async fn connect_verify(Json(target): Json<TargetVerify>) -> impl IntoRespon
 
     connections.push(TargetInfo { target: target.target.clone(), token: token.clone()});
 
-    if let Err(e) = write_json_info("card.json", &card_map) {
+    if let Err(e) = write_card_info("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -137,8 +100,51 @@ pub async fn connect_verify(Json(target): Json<TargetVerify>) -> impl IntoRespon
     })).into_response()
 }
 
+pub async fn check_trade_history(Json(id): Json<Identification>) -> impl IntoResponse {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let day_end = get_day_end(now);
+
+    let card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return String::from("Server error, please call admin fixing!").into_response();
+        }
+    };
+
+    let data = match card_map.values().find(|data| data.card_holder == id.card_holder) {
+        Some(card) => card,
+        None => return String::from("No card found!").into_response(),
+    };
+
+    let values: Vec<_> = match &data.transaction {
+        Some(map) => map.iter()
+            .filter(|&(&k, _)| k > day_end - 7 * 86400)
+            .map(|(_, v)| *v)
+            .collect(),
+        None => return ("You didn't have any trade!".to_string()).into_response(),
+    };
+
+    let value_set: HashSet<i64> = values.into_iter().collect();
+
+    let trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return String::from("Server error, please call admin fixing!").into_response();
+        }
+    };
+
+    let trades: HashMap<i64, TradeHistory> = trade_map.iter()
+        .filter(|&(&k, _)| value_set.contains(&k))
+        .map(|(&k, v)| (k, v.clone()))
+        .collect();
+
+    Json(json!(trades)).into_response()
+}
+
 pub async fn check_target_exist(Json(id): Json<Identification>) -> impl IntoResponse {
-    let card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -154,7 +160,7 @@ pub async fn check_target_exist(Json(id): Json<Identification>) -> impl IntoResp
 }
 
 pub async fn get_balance(Json(id): Json<Identification>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);

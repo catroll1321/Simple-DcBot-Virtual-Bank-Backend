@@ -3,19 +3,37 @@ use std::io::{Error, ErrorKind};
 use axum::{extract::Json, response::IntoResponse};
 use axum::http::StatusCode;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
-use structure::{CardInfo, BuyStock, Symbol, Stock, SellStock, TransactionType};
-use function::{get_json_map, write_json_info, check_balance};
+use structure::{CardInfo, BuyStock, Symbol, Stock, SellStock, TradeHistory, TransactionType, StockHold, Identification};
+use function::{get_card_map, write_card_info, check_balance, get_trade_map, write_trade_info, get_stock_map, write_stock_info};
 use yahoo_finance_api as yahoo;
 use std::error::Error as StdError;
+use std::time::{SystemTime, UNIX_EPOCH};
 use rust_decimal::prelude::ToPrimitive;
+use serde_json::json;
 use tokio::task;
 
 pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+        }
+    };
+
+    let mut trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
         }
     };
 
@@ -30,6 +48,15 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
             println!("Failed to get price: {}", e);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get price!").into_response();
         }
+    };
+
+    let last_trade: i64;
+
+    if trade_map.is_empty() {
+        last_trade = 0;
+    } else {
+        let Some(last) = trade_map.keys().max() else { todo!() };
+        last_trade = *last;
     };
 
     let total_cost = price * Decimal::from(stock.hand) / Decimal::new(stock.leverage.to_i64().unwrap(), 2);
@@ -38,31 +65,50 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
         return (StatusCode::BAD_REQUEST, "Insufficient balance").into_response();
     }
 
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     data.balance -= total_cost;
     let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
-    let transaction_type = transaction_map.entry(String::from("Transaction")).or_insert_with(Vec::new);
-    transaction_type.push(TransactionType::Debit { amount: total_cost.to_f64().unwrap() });
+    transaction_map.insert(now, last_trade + 1);
 
-    let stock_map = data.stock.get_or_insert_with(HashMap::new);
-    let buy_stocks = stock_map.entry(String::from("Buy")).or_insert_with(Vec::new);
-
-    buy_stocks.push(Stock {
-        symbol: stock.symbol.clone(),
-        hand: stock.hand,
-        leverage: stock.leverage,
-        price,
-    });
-
-    if let Err(e) = write_json_info("card.json", &card_map) {
+    if let Err(e) = write_card_info("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    format!("Buy {} hands {} leverage {} times, profit {} USD", stock.hand, stock.symbol, stock.leverage, total_cost).into_response()
+    let stock_info = stock_map.entry(stock.card_holder.clone()).or_insert_with(Vec::new);
+    stock_info.push(StockHold {
+        timestamp: now,
+        stock: Stock {
+            symbol: stock.symbol.clone(),
+            hand: stock.hand,
+            leverage: stock.leverage,
+            price,
+        },
+    });
+
+    if let Err(e) = write_stock_info("stockhold.json", &stock_map) {
+        println!("Error in writing trade json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+    }
+
+    let trade_info = TradeHistory {
+        timestamp: now,
+        transaction_type: TransactionType::Debit { amount: total_cost.to_f64().unwrap() },
+        target_user: String::from("Stock! Bot"),
+    };
+
+    trade_map.insert(last_trade + 1, trade_info);
+
+    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+        println!("Error in writing trade json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+    }
+
+    format!("Buy {} hands {} leverage {} times, cost {} USD", stock.hand, stock.symbol, stock.leverage, total_cost).into_response()
 }
 
 pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_json_map("card.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -83,55 +129,95 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
         }
     };
 
-    let stock_map = match &mut data.stock {
-        Some(map) => map,
-        None => return (StatusCode::BAD_REQUEST, "No stocks held yet").into_response(),
+    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+        }
     };
 
-    let buy_vec = match stock_map.get_mut("Buy") {
+    let mut trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+        }
+    };
+
+    let last_trade: i64;
+
+    if trade_map.is_empty() {
+        last_trade = 0;
+    } else {
+        let Some(last) = trade_map.keys().max() else { todo!() };
+        last_trade = *last;
+    };
+
+    let buy_vec = match stock_map.get_mut(&stock.card_holder) {
         Some(vec) => vec,
         None => return (StatusCode::BAD_REQUEST, "No stocks bought yet").into_response(),
     };
 
-    let pos = buy_vec.iter().position(|s| s.symbol == stock.symbol);
+    let pos = buy_vec.iter().position(|s| s.stock.symbol == stock.symbol);
     let buy_data = match pos {
         Some(i) => buy_vec.remove(i),
         None => return (StatusCode::BAD_REQUEST, "No stock holdings found").into_response(),
     };
 
-    if buy_data.leverage == Decimal::from(0) {
-        return (StatusCode::BAD_REQUEST, "Leverage cannot be zero").into_response();
-    }
-
-    let hand = buy_data.hand;
-    let leverage = buy_data.leverage;
-    let buy_price = buy_data.price;
+    let hand = buy_data.stock.hand;
+    let leverage = buy_data.stock.leverage;
+    let buy_price = buy_data.stock.price;
     let sell_price = price;
     let earning = (sell_price - buy_price) * hand * leverage;
     let principal = buy_price * Decimal::from(hand) / Decimal::new(leverage.to_i64().unwrap(), 2);
     let total_money = principal + earning;
 
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     data.balance += total_money;
     let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
-    let transaction_type = transaction_map.entry(String::from("Transaction")).or_insert_with(Vec::new);
-    transaction_type.push(TransactionType::Credit { amount: total_money.to_f64().unwrap() });
+    transaction_map.insert(now, last_trade + 1);
 
-    let stock_map = data.stock.get_or_insert_with(HashMap::new);
-    let sell_stocks = stock_map.entry(String::from("Sold")).or_insert_with(Vec::new);
+    if let Err(e) = write_stock_info("stockhold.json", &stock_map) {
+        println!("Error in writing trade json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+    }
 
-    sell_stocks.push(Stock {
-        symbol: stock.symbol.clone(),
-        hand,
-        leverage,
-        price
-    });
-
-    if let Err(e) = write_json_info("card.json", &card_map) {
+    if let Err(e) = write_card_info("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    let trade_info = TradeHistory {
+        timestamp: now,
+        transaction_type: TransactionType::Credit { amount: total_money.to_f64().unwrap() },
+        target_user: String::from("Stock! Bot"),
+    };
+
+    trade_map.insert(last_trade + 1, trade_info);
+    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+        println!("Error in writing trade json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+    }
+
     format!("Sold {} hands {} leverage {} times, profit {} USD", hand, stock.symbol, leverage, earning).into_response()
+}
+
+pub async fn check_stock_hold(Json(id): Json<Identification>) -> impl IntoResponse {
+    let stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("Error： {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
+        }
+    };
+
+    let result = match stock_map.get(id.card_holder.as_str()) {
+        Some(holds) => holds,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "You currently do not hold any stocks!").into_response()
+    };
+
+    Json(json!(result)).into_response()
 }
 
 pub async fn get_last_price(Json(name): Json<Symbol>) -> impl IntoResponse {

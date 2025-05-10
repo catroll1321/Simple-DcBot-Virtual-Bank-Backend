@@ -9,9 +9,8 @@ pub struct CardInfo {
     pub good_thru: u16,
     pub verify_number: u16,
     pub balance: Decimal,
-    pub stock: Option<HashMap<String, Vec<Stock>>>,
     pub connection: Option<HashMap<String, Vec<TargetInfo>>>,
-    pub transaction: Option<HashMap<String, Vec<TransactionType>>>,
+    pub transaction: Option<HashMap<i64, i64>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -21,16 +20,24 @@ pub struct CardQuery {
     pub verify_number: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum TransactionType {
     Credit { amount: f64 },
     Debit { amount: f64 },
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TradeHistory {
+    pub timestamp: i64,
+    pub transaction_type: TransactionType,
+    pub target_user: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct DiscordTrade {
     pub card_holder: String,
+    pub target_user: String,
     pub transaction_type: TransactionType,
 }
 
@@ -83,8 +90,7 @@ pub struct SellStock {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct TradeHistory {
+pub struct StockHold {
     pub timestamp: i64,
-    pub transaction_type: TransactionType,
-    pub target_user: String,
+    pub stock: Stock,
 }
