@@ -1,0 +1,12 @@
+[package]
+name = "stock"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+structure = { path = "../structure" }
+function = { path = "../function" }
+axum = "0.8.3"
+yahoo_finance_api = { version = "3.0.0", features = ["blocking"] }
+rust_decimal = "1.37.1"
+tokio = { version = "1.44.2", features = ["full"] }

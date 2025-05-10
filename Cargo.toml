@@ -1,0 +1,13 @@
+[package]
+name = "AxumV4"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [".", "src/function", "src/handler", "src/stock", "src/structure"]
+
+[dependencies]
+handler = { path = "src/handler" }
+stock = { path = "src/stock" }
+axum = "0.8.3"
+tokio = { version = "1.44.2", features = ["full"] }
