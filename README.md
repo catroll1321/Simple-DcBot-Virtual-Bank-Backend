@@ -27,7 +27,7 @@ The project is structured into multiple crates to modularize the components:
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/your-username/Simple-DcBot-Virtual-Bank-Backend.git
+   git clone https://github.com/catroll1321/Simple-DcBot-Virtual-Bank-Backend.git
    cd Simple-DcBot-Virtual-Bank-Backend
    ```
 

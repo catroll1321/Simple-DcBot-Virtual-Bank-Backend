@@ -31,6 +31,7 @@ pub fn generate_n_digit(seed: u64, digits: u32) -> u64 {
     rng.random_range(lower..upper)
 }
 
+//I have no idea bruh :(
 pub fn generate_yymm(seed: u64) -> u16 {
     let mut seed_bytes = [0u8; 32];
     seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
