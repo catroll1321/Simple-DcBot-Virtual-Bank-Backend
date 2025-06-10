@@ -3,17 +3,18 @@ use std::io::{Error, ErrorKind};
 use axum::{extract::Json, response::IntoResponse};
 use axum::http::StatusCode;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
-use structure::{CardInfo, BuyStock, Symbol, Stock, SellStock, TradeHistory, TransactionType, StockHold, Identification};
-use function::{get_card_map, write_card_info, check_balance, get_trade_map, write_trade_info, get_stock_map, write_stock_info};
+use structure::{CardInfo, BuyStock, Symbol, Stock, SellStock, TradeHistory, TransactionType, StockHold, Identification, StockHistory};
+use function::{check_balance, write_json_to_file, get_map};
 use yahoo_finance_api as yahoo;
 use std::error::Error as StdError;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::json;
 use tokio::task;
+use yahoo_finance_api::Quote;
 
 pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -21,7 +22,7 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
         }
     };
 
-    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_map("stockhold.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -29,7 +30,7 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
         }
     };
 
-    let mut trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+    let mut trade_map: HashMap<i64, TradeHistory> = match get_map("trade.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -70,7 +71,7 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
     let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
     transaction_map.insert(now, last_trade + 1);
 
-    if let Err(e) = write_card_info("account.json", &card_map) {
+    if let Err(e) = write_json_to_file("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -79,6 +80,7 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
     stock_info.push(StockHold {
         timestamp: now,
         stock: Stock {
+            buy_type: stock.buy_type,
             symbol: stock.symbol.clone(),
             hand: stock.hand,
             leverage: stock.leverage,
@@ -86,7 +88,7 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
         },
     });
 
-    if let Err(e) = write_stock_info("stockhold.json", &stock_map) {
+    if let Err(e) = write_json_to_file("stockhold.json", &stock_map) {
         println!("Error in writing trade json: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
     }
@@ -99,16 +101,21 @@ pub async fn buy_stock(Json(stock): Json<BuyStock>) -> impl IntoResponse {
 
     trade_map.insert(last_trade + 1, trade_info);
 
-    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+    if let Err(e) = write_json_to_file("trade.json", &trade_map) {
         println!("Error in writing trade json: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
     }
 
-    format!("Buy {} hands {} leverage {} times, cost {} USD", stock.hand, stock.symbol, stock.leverage, total_cost).into_response()
+    (StatusCode::OK, Json(json!({
+        "symbol": stock.symbol,
+        "hand": stock.hand,
+        "leverage": stock.leverage,
+        "cost": total_cost
+    }))).into_response()
 }
 
 pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
-    let mut card_map: HashMap<u64, CardInfo> = match get_card_map("account.json") {
+    let mut card_map: HashMap<u64, CardInfo> = match get_map("account.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -129,7 +136,7 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
         }
     };
 
-    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+    let mut stock_map: HashMap<String, Vec<StockHold>> = match get_map("stockhold.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -137,7 +144,7 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
         }
     };
 
-    let mut trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+    let mut trade_map: HashMap<i64, TradeHistory> = match get_map("trade.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -159,7 +166,8 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
         None => return (StatusCode::BAD_REQUEST, "No stocks bought yet").into_response(),
     };
 
-    let pos = buy_vec.iter().position(|s| s.stock.symbol == stock.symbol);
+    let pos = buy_vec.iter().position(|s| s.timestamp == stock.timestamp && s.stock.symbol == stock.symbol);
+
     let buy_data = match pos {
         Some(i) => buy_vec.remove(i),
         None => return (StatusCode::BAD_REQUEST, "No stock holdings found").into_response(),
@@ -168,8 +176,18 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
     let hand = buy_data.stock.hand;
     let leverage = buy_data.stock.leverage;
     let buy_price = buy_data.stock.price;
+    let buy_type = buy_data.stock.buy_type.as_str();
     let sell_price = price;
-    let earning = (sell_price - buy_price) * hand * leverage;
+    let earning: Decimal;
+
+    if buy_type == "Long" {
+        earning = (sell_price - buy_price) * hand * leverage;
+    } else if buy_type == "Short" {
+        earning = (buy_price - sell_price) * hand * leverage;
+    } else {
+        return (StatusCode::BAD_REQUEST, "Wrong buy type").into_response();
+    }
+
     let principal = buy_price * Decimal::from(hand) / Decimal::new(leverage.to_i64().unwrap(), 2);
     let total_money = principal + earning;
 
@@ -178,12 +196,12 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
     let transaction_map = data.transaction.get_or_insert_with(HashMap::new);
     transaction_map.insert(now, last_trade + 1);
 
-    if let Err(e) = write_stock_info("stockhold.json", &stock_map) {
+    if let Err(e) = write_json_to_file("stockhold.json", &stock_map) {
         println!("Error in writing trade json: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
     }
 
-    if let Err(e) = write_card_info("account.json", &card_map) {
+    if let Err(e) = write_json_to_file("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -195,16 +213,21 @@ pub async fn sell_stock(Json(stock): Json<SellStock>) -> impl IntoResponse {
     };
 
     trade_map.insert(last_trade + 1, trade_info);
-    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+    if let Err(e) = write_json_to_file("trade.json", &trade_map) {
         println!("Error in writing trade json: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Server error, please call admin fixing!").into_response();
     }
 
-    format!("Sold {} hands {} leverage {} times, profit {} USD", hand, stock.symbol, leverage, earning).into_response()
+    (StatusCode::OK, Json(json!({
+        "symbol": stock.symbol,
+        "hand": hand,
+        "leverage": leverage,
+        "earning": earning
+    }))).into_response()
 }
 
 pub async fn check_stock_hold(Json(id): Json<Identification>) -> impl IntoResponse {
-    let stock_map: HashMap<String, Vec<StockHold>> = match get_stock_map("stockhold.json") {
+    let stock_map: HashMap<String, Vec<StockHold>> = match get_map("stockhold.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -217,7 +240,7 @@ pub async fn check_stock_hold(Json(id): Json<Identification>) -> impl IntoRespon
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "You currently do not hold any stocks!").into_response()
     };
 
-    Json(json!(result)).into_response()
+    (StatusCode::OK, Json(json!(result))).into_response()
 }
 
 pub async fn get_last_price(Json(name): Json<Symbol>) -> impl IntoResponse {
@@ -227,13 +250,17 @@ pub async fn get_last_price(Json(name): Json<Symbol>) -> impl IntoResponse {
             return (StatusCode::INTERNAL_SERVER_ERROR, "No stock symbol or name found").into_response();
         }
     };
+
     let price = match get_stock_price(symbol.as_str()).await {
         Ok(price) => price,
         Err(_) => return String::from("Failed to obtain price!").into_response(),
     };
-    format!("{} current price is {} USD", symbol, price.round_dp(2)).into_response()
+
+    (StatusCode::OK, Json(json!({ "symbol": symbol, "price": price.round_dp(2) }))).into_response()
 }
 
+
+//stock functions
 pub async fn search_stock_name(name: &str) -> Result<String, Error> {
     let name = name.to_string();
     task::spawn_blocking(move || {
@@ -266,6 +293,32 @@ pub async fn get_stock_price(name: &str) -> Result<Decimal, Box<dyn StdError + S
         .await?
 }
 
+pub async fn fetch_stock_history(name: &str, period: String, interval: String) -> Result<Vec<Quote>, Box<dyn StdError + Send + Sync>> {
+    let symbol = match search_stock_name(name).await {
+        Ok(s) => s,
+        Err(_) => {
+            return Err(Box::new(Error::new(ErrorKind::Other, "No stock symbol or name found")));
+        }
+    };
+    let period = period.to_string();
+    let interval = interval.to_string();
+
+    task::spawn_blocking(move || {
+        let provider = yahoo::YahooConnector::new()?;
+        let response = provider.get_quote_range(&symbol, &interval, &period)?;
+        let quotes = response.quotes()?;
+        Ok(quotes)
+    }).await?
+}
+
+pub async fn get_stock_history(Json(history): Json<StockHistory>) -> impl IntoResponse {
+    let quotes = match fetch_stock_history(history.symbol.as_str(), history.period, history.interval).await {
+        Ok(quotes) => quotes,
+        Err(_) => return String::from("Failed to obtain stock history!").into_response(),
+    };
+    (StatusCode::OK, Json(json!(quotes))).into_response()
+}
+
 pub fn get_verified_card<'a>(
     card_map: &'a mut HashMap<u64, CardInfo>,
     card_holder: &str,
@@ -285,6 +338,5 @@ pub fn get_verified_card<'a>(
     if !matched {
         return Err((StatusCode::BAD_REQUEST, "Failed to verify"));
     }
-
     Ok(data)
 }
