@@ -8,7 +8,8 @@ use hmac::{Hmac, Mac};
 use rust_decimal::{Decimal, prelude::Zero};
 use rust_decimal::prelude::FromPrimitive;
 use sha2::Sha256;
-use structure::{CardInfo, DiscordTrade, StockHold, TradeHistory, TransactionType};
+use serde::{Serialize, de::DeserializeOwned};
+use structure::{CardInfo, DiscordTrade, TradeHistory, TransactionType};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -31,54 +32,26 @@ pub fn generate_n_digit(seed: u64, digits: u32) -> u64 {
     rng.random_range(lower..upper)
 }
 
-//I have no idea bruh :(
-pub fn generate_yymm(seed: u64) -> u16 {
-    let mut seed_bytes = [0u8; 32];
-    seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    let mut rng = ChaCha8Rng::from_seed(seed_bytes);
-    let year = rng.random_range(20..100);
-    let month = rng.random_range(1..13);
-    year * 100 + month as u16
+pub fn generate_yymm() -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let chrono_time = Local.timestamp_opt(now, 0).unwrap();
+    let year = chrono_time.year();
+    let month = chrono_time.month() as i32;
+    let card_year = year % 100;
+    let yymm = month * 100 + card_year + 5;
+    format!("{:04}", yymm)
 }
 
-pub fn get_card_map(path: &str) -> Result<HashMap<u64, CardInfo>, String> {
+pub fn get_map<T: Serialize + DeserializeOwned>(path: &str) -> Result<T, String> {
     let read = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {} ：{}", path, e))?;
-    let parsed: HashMap<u64, CardInfo> = serde_json::from_str(&read)
+    let parsed: T = serde_json::from_str(&read)
         .map_err(|e| format!("Failed to analysis of {} ：{}", path, e))?;
     Ok(parsed)
 }
 
-pub fn get_trade_map(path: &str) -> Result<HashMap<i64, TradeHistory>, String> {
-    let read = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {} ：{}", path, e))?;
-    let parsed: HashMap<i64, TradeHistory> = serde_json::from_str(&read)
-        .map_err(|e| format!("Failed to analysis of {} ：{}", path, e))?;
-    Ok(parsed)
-}
-
-pub fn get_stock_map(path: &str) -> Result<HashMap<String, Vec<StockHold>>, String> {
-    let read = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {} ：{}", path, e))?;
-    let parsed: HashMap<String, Vec<StockHold>> = serde_json::from_str(&read)
-        .map_err(|e| format!("Failed to analysis of {} ：{}", path, e))?;
-    Ok(parsed)
-}
-
-pub fn write_card_info(path: &str, input: &HashMap<u64, CardInfo>) -> Result<(), io::Error> {
-    let json_str = serde_json::to_string_pretty(&input)?;
-    fs::write(path, &json_str)?;
-    Ok(())
-}
-
-pub fn write_trade_info(path: &str, input: &HashMap<i64, TradeHistory>) -> Result<(), io::Error> {
-    let json_str = serde_json::to_string_pretty(&input)?;
-    fs::write(path, &json_str)?;
-    Ok(())
-}
-
-pub fn write_stock_info(path: &str, input: &HashMap<String, Vec<StockHold>>) -> Result<(), io::Error> {
-    let json_str = serde_json::to_string_pretty(&input)?;
+pub fn write_json_to_file<T: Serialize>(path: &str, input: &T) -> Result<(), io::Error> {
+    let json_str = serde_json::to_string_pretty(input)?;
     fs::write(path, &json_str)?;
     Ok(())
 }
@@ -87,31 +60,53 @@ pub fn check_balance(balance: &Decimal, price: Decimal) -> bool {
     *balance >= price && price > Decimal::zero()
 }
 
+pub fn get_card_name(card_type: String) -> Result<String, String> {
+    match card_type.as_str() {
+        "Infinite" => Ok("黑卡".to_string()),
+        "Platinum" => Ok("白金卡".to_string()),
+        "Classic" => Ok("一般卡".to_string()),
+        _ => Err("找不到卡片類型".to_string()),
+    }
+}
+
 pub fn hash_str_to_u64(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
 }
 
-pub fn gen_card_num(mixture: u64) -> u64 {
-    let card_issuer: u64 = 4878;
+pub fn gen_card_num(scheme: &str, mixture: u64) -> Result<String, String> {
+    let bin_code = match scheme {
+        "Visa" => 4787,
+        "MasterCard" => 2289,
+        _ => return Err("Invalid scheme".to_string()),
+    };
     let card_last12 = generate_n_digit(mixture, 12);
-    let card_number = card_issuer*1000000000000 + card_last12;
-    card_number
+    let card_number = bin_code * 1000000000000 + card_last12;
+    Ok(format!("{card_number}"))
 }
-pub fn gen_card(mixture: u64, id: &str) -> CardInfo {
-    let card_number = gen_card_num(mixture);
+
+pub fn gen_card(scheme: String, card_type: String, mixture: u64, holder: &str) -> Result<CardInfo, String> {
+    let card_number = match gen_card_num(&scheme, mixture) {
+        Ok(n) => n,
+        Err(e) => return Err(e),
+    };
+
     let verify_number = generate_n_digit(mixture, 3);
-    let good_thru = generate_yymm(mixture);
-    CardInfo {
-        card_holder: id.to_string(),
+    let good_thru = generate_yymm();
+    let card_info = CardInfo {
+        card_holder: holder.to_string(),
         card_number,
         good_thru,
-        verify_number: verify_number as u16,
+        scheme,
+        card_type,
+        verify_number: verify_number.to_string(),
         balance: Decimal::zero(),
         connection: None,
         transaction: None,
-    }
+    };
+
+    Ok(card_info)
 }
 
 pub fn get_day_end(unix_time: i64) -> i64 {
@@ -128,7 +123,7 @@ pub fn handler_transaction(id: DiscordTrade, card_map: &mut HashMap<u64, CardInf
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let last_trade: i64;
 
-    let mut trade_map: HashMap<i64, TradeHistory> = match get_trade_map("trade.json") {
+    let mut trade_map: HashMap<i64, TradeHistory> = match get_map("trade.json") {
         Ok(map) => map,
         Err(e) => {
             eprintln!("Error： {}", e);
@@ -163,7 +158,7 @@ pub fn handler_transaction(id: DiscordTrade, card_map: &mut HashMap<u64, CardInf
                     };
 
                     trade_map.insert(last_trade + 1, trade_info);
-                    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+                    if let Err(e) = write_json_to_file("trade.json", &trade_map) {
                         println!("Error in writing trade json: {}", e);
                         return Err(String::from("Server error, please call admin fixing!"));
                     }
@@ -186,7 +181,7 @@ pub fn handler_transaction(id: DiscordTrade, card_map: &mut HashMap<u64, CardInf
                     };
 
                     trade_map.insert(last_trade + 1, trade_info);
-                    if let Err(e) = write_trade_info("trade.json", &trade_map) {
+                    if let Err(e) = write_json_to_file("trade.json", &trade_map) {
                         println!("Error in writing trade json: {}", e);
                         return Err(String::from("Server error, please call admin fixing!"));
                     }
@@ -202,7 +197,7 @@ pub fn handler_transaction(id: DiscordTrade, card_map: &mut HashMap<u64, CardInf
         None => return Err(String::from("Transaction failed, please check the amount format")),
     };
 
-    if let Err(e) = write_card_info("account.json", &card_map) {
+    if let Err(e) = write_json_to_file("account.json", &card_map) {
         println!("Error in writing card json: {}", e);
         return Err(String::from("Server error, please call admin fixing!"));
     }
