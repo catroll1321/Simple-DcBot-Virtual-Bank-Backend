@@ -5,19 +5,14 @@ use serde::{Serialize, Deserialize};
 #[derive(Serialize, Deserialize)]
 pub struct CardInfo {
     pub card_holder: String,
-    pub card_number: u64,
-    pub good_thru: u16,
-    pub verify_number: u16,
+    pub card_number: String,
+    pub good_thru: String,
+    pub verify_number: String,
+    pub scheme: String,
+    pub card_type: String,
     pub balance: Decimal,
     pub connection: Option<HashMap<String, Vec<TargetInfo>>>,
     pub transaction: Option<HashMap<i64, i64>>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CardQuery {
-    pub card_number: u64,
-    pub good_thru: u16,
-    pub verify_number: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -39,6 +34,13 @@ pub struct DiscordTrade {
     pub card_holder: String,
     pub target_user: String,
     pub transaction_type: TransactionType,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RegisterInfo {
+    pub discord_id: String,
+    pub scheme: String,
+    pub card_type: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -65,6 +67,7 @@ pub struct Symbol {
 
 #[derive(Serialize, Deserialize)]
 pub struct Stock {
+    pub buy_type: String,
     pub symbol: String,
     pub hand: Decimal,
     pub leverage: Decimal,
@@ -73,6 +76,7 @@ pub struct Stock {
 
 #[derive(Serialize, Deserialize)]
 pub struct BuyStock {
+    pub buy_type: String,
     pub symbol: String,
     pub hand: Decimal,
     pub leverage: Decimal,
@@ -84,6 +88,7 @@ pub struct BuyStock {
 #[derive(Serialize, Deserialize)]
 pub struct SellStock {
     pub symbol: String,
+    pub timestamp: i64,
     pub token: String,
     pub target: String,
     pub card_holder: String,
@@ -93,4 +98,11 @@ pub struct SellStock {
 pub struct StockHold {
     pub timestamp: i64,
     pub stock: Stock,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StockHistory {
+    pub symbol: String,
+    pub period: String,
+    pub interval: String,
 }
